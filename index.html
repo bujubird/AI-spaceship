@@ -283,11 +283,14 @@
 
                 socket.on('client_connected', (clientId) => {
                     console.log("Client connected: " + clientId);
-                    // Negotiate Screen
-                    // Min dimensions
-                    // For now, Host dictates its own size or min?
-                    // "Game pixel size is the smaller of the two"
-                    // We need to wait for client_hello to know client size though.
+                    // Sync Existing Enemies to the new Client
+                    if (networkMode === 'HOST') {
+                        enemies.forEach(e => {
+                            socket.emit('entity_create', {
+                                id: e.id, type: 'ENEMY', x: e.x, y: e.y, angle: e.angle
+                            });
+                        });
+                    }
                 });
 
                 socket.on('client_hello', (data) => {
@@ -362,21 +365,48 @@
                             // Find enemy by ID
                             let e = enemies.find(en => en.id === data.id);
                             if (!e) {
-                                // Create if missing? Or wait for EntityCreate?
-                                // It's safer to have EntityCreate.
+                                // Fallback: Create if missing (Sync healing)
+                                e = {
+                                    id: data.id,
+                                    x: data.x, y: data.y,
+                                    angle: data.angle,
+                                    isTurning: false,
+                                    hp: 30
+                                };
+                                enemies.push(e);
+                                enemies.push(e);
                             } else {
-                                e.x = data.x; e.y = data.y; e.angle = data.angle;
+                                // Protocol: Offsets (dx, dy) + Sync (x, y)
+                                // If dx/dy present, use them?
+                                // Professor: "Movements are specified as pixel offsets"
+                                // We apply offsets if available, otherwise snap?
+                                if (data.dx !== undefined) {
+                                    e.x += data.dx;
+                                    e.y += data.dy;
+                                    // Correction check (Anti-drift)
+                                    if (Math.hypot(e.x - data.x, e.y - data.y) > 10) {
+                                        e.x = data.x; e.y = data.y;
+                                    }
+                                } else {
+                                    e.x = data.x; e.y = data.y;
+                                }
+                                e.angle = data.angle;
                             }
                         } else if (data.type === 'CLIENT_PLAYER') {
-                            // Host telling Client where Client is?
-                            // "For the client's side the behavior of the player ship only is sent." -> Client sends to Host.
-                            // "EntityMove" comes from Host.
-                            // Host is authoritative. It might correct Client.
-                            // Let's ignore Client correction for smooth local feel, or apply it?
-                            // Let's use it to correct drift.
-                            if (Math.hypot(ship.x - data.x, ship.y - data.y) > 20) {
-                                ship.x = data.x; ship.y = data.y;
+                            // ...
+                        } else if (data.type === 'HOST_PLAYER') { // Handling Host Ship
+                            if (!remotePlayer) remotePlayer = { x: 0, y: 0, angle: 0 };
+                            if (data.dx !== undefined) {
+                                remotePlayer.x += data.dx;
+                                remotePlayer.y += data.dy;
+                                if (Math.hypot(remotePlayer.x - data.x, remotePlayer.y - data.y) > 10) {
+                                    remotePlayer.x = data.x; remotePlayer.y = data.y;
+                                }
+                            } else {
+                                remotePlayer.x = data.x;
+                                remotePlayer.y = data.y;
                             }
+                            remotePlayer.angle = data.angle;
                         }
                     }
                 });
@@ -443,17 +473,18 @@
                     } else if (data.type === 'TORPEDO') {
                         const rad = (data.angle - 90) * Math.PI / 180;
                         const dx = Math.cos(rad); const dy = Math.sin(rad);
-                        // Add to local torpedo list?
-                        // If Client, we add to torpedoes? 
-                        // But torpedoes collision is logical.
-                        // If Client, we just want to see it.
-                        // We can add to a "visualTorpedoes" list or shared list but disable collision checks for Client?
-                        // Host handles collision.
-                        // Let's add with a flag `isRemote: true`.
                         torpedoes.push({
                             x: data.x + dx * 45, y: data.y + dy * 45,
                             dx: dx, dy: dy,
                             isRemote: true
+                        });
+                    } else if (data.type === 'ENEMY_TORPEDO') {
+                        // Visual only on Client (Host handles logic)
+                        const rad = (data.angle - 90) * Math.PI / 180;
+                        const dx = Math.cos(rad); const dy = Math.sin(rad);
+                        enemyProjectiles.push({
+                            x: data.x + dx * 45, y: data.y + dy * 45,
+                            dx: dx, dy: dy
                         });
                     }
                 });
@@ -622,7 +653,8 @@
                 isLaserActive: false,
                 laserEndTime: 0,
                 isTurning: false,
-                hp: 30 // Added HP for damage logic
+                hp: 30, // Added HP for damage logic
+                bounce: { active: false, vx: 0, vy: 0, timer: 0 } // Host-side bounce state
             };
 
             if (networkMode === 'HOST') {
@@ -835,6 +867,10 @@
             entity.x += dx;
             entity.y += dy;
 
+            // Store Delta for Network Sync (Protocol Requirement: Pixel Offsets)
+            entity.lastDx = dx;
+            entity.lastDy = dy;
+
             if (isMultiplayer && networkMode === 'CLIENT' && entity === ship) {
                 // Send Delta
                 socket.emit('client_ship_move', { dx: dx, dy: dy, angle: ship.angle });
@@ -1010,16 +1046,33 @@
                     // ... Or simply, send "input status" and let host sim?
                     // Protocol: ClientShipMove(dx, dy, angle).
                 } else if (networkMode === 'HOST') {
-                    // Send EntityMoves
+                    // Send EntityMoves (Using Pixel Offsets + Absolute for robustness)
                     // Host Ship
-                    socket.emit('entity_move', { type: 'HOST_PLAYER', x: ship.x, y: ship.y, angle: ship.angle });
+                    socket.emit('entity_move', {
+                        type: 'HOST_PLAYER',
+                        id: 'HOST',
+                        dx: ship.lastDx || 0, dy: ship.lastDy || 0, // Protocol: Offset
+                        x: ship.x, y: ship.y, angle: ship.angle
+                    });
                     // Remote Player (Client) - Re-broadcast authoritative?
                     if (remotePlayer) {
-                        socket.emit('entity_move', { type: 'CLIENT_PLAYER', x: remotePlayer.x, y: remotePlayer.y, angle: remotePlayer.angle });
+                        socket.emit('entity_move', {
+                            type: 'CLIENT_PLAYER',
+                            dx: 0, dy: 0, // We don't calc delta for remote player here easily, or just rely on Client?
+                            // Actually Host should forward Client's movement?
+                            // But Protocol says: "On the host-side... behavior of player and enemy... sent."
+                            // "For client's side behavior of player ship only".
+                            // Let's just send abs pos for Client Player re-broadcast or ignore delta there.
+                            x: remotePlayer.x, y: remotePlayer.y, angle: remotePlayer.angle
+                        });
                     }
                     // Enemies
                     enemies.forEach(e => {
-                        socket.emit('entity_move', { type: 'ENEMY', id: e.id, x: e.x, y: e.y, angle: e.angle });
+                        socket.emit('entity_move', {
+                            type: 'ENEMY', id: e.id,
+                            dx: e.lastDx || 0, dy: e.lastDy || 0, // Protocol: Offset
+                            x: e.x, y: e.y, angle: e.angle
+                        });
                     });
                 }
             }
@@ -1040,16 +1093,25 @@
                     enemy.isTurning = true;
                     enemy.nextTurnTime = now + 1000 + Math.random() * 2000;
                 }
-                if (now > enemy.nextTorpedoTime) {
-                    const angle = Math.atan2(ship.y - enemy.y, ship.x - enemy.x);
-                    const dx = Math.cos(angle), dy = Math.sin(angle);
-                    enemyProjectiles.push({ x: enemy.x + dx * 45, y: enemy.y + dy * 45, dx: dx, dy: dy });
-                    enemy.nextTorpedoTime = now + 5000 + Math.random() * 5000; // Reset timer
-                }
-                if (!enemy.isLaserActive && now > enemy.nextLaserTime) {
-                    enemy.isLaserActive = true;
-                    enemy.laserEndTime = now + 1000;
-                    enemy.nextLaserTime = now + 2500 + Math.random() * 2000;
+                if (networkMode !== 'CLIENT') {
+                    if (now > enemy.nextTorpedoTime) {
+                        const angle = Math.atan2(ship.y - enemy.y, ship.x - enemy.x);
+                        const dx = Math.cos(angle), dy = Math.sin(angle);
+                        const ex = enemy.x + dx * 45; const ey = enemy.y + dy * 45;
+                        enemyProjectiles.push({ x: ex, y: ey, dx: dx, dy: dy });
+                        if (isMultiplayer) {
+                            socket.emit('weapon_fired', {
+                                type: 'ENEMY_TORPEDO',
+                                x: enemy.x, y: enemy.y, angle: angle * 180 / Math.PI + 90
+                            });
+                        }
+                        enemy.nextTorpedoTime = now + 5000 + Math.random() * 5000;
+                    }
+                    if (!enemy.isLaserActive && now > enemy.nextLaserTime) {
+                        enemy.isLaserActive = true;
+                        enemy.laserEndTime = now + 1000;
+                        enemy.nextLaserTime = now + 2500 + Math.random() * 2000;
+                    }
                 }
                 if (enemy.isLaserActive && now > enemy.laserEndTime) {
                     enemy.isLaserActive = false;
@@ -1069,8 +1131,17 @@
                 else if (enemy.y >= canvas.height) { enemy.y = canvas.height; hitWall = true; enemy.targetAngle = (315 + Math.random() * 90) % 360; }
                 if (hitWall) { enemy.isTurning = true; enemy.nextTurnTime = now + 1000; }
 
+                // Apply Bounce (Enemy)
+                if (enemy.bounce && enemy.bounce.active) {
+                    enemy.x += enemy.bounce.vx;
+                    enemy.y += enemy.bounce.vy;
+                    enemy.bounce.timer--;
+                    if (enemy.bounce.timer <= 0) enemy.bounce.active = false;
+                }
+
                 // Ship vs Enemy Collision Check
-                if (ship.hull > 0 && Math.hypot(ship.x - enemy.x, ship.y - enemy.y) < 70) { // 35+35 radius approx
+                // Ship vs Enemy Collision Check (Host Authoritative)
+                if (networkMode !== 'CLIENT' && ship.hull > 0 && Math.hypot(ship.x - enemy.x, ship.y - enemy.y) < 70) {
                     // COLLISION!
                     // Both take high laser damage (which is 5 in current logic, maybe scale up)
                     // Requirement: "damage equal to the high value of the a laser blast" -> let's say 10 to be safe
@@ -1085,6 +1156,7 @@
                         spawnParticles(enemy.x, enemy.y, 60, 'debris');
                         spawnParticles(enemy.x, enemy.y, 40, 'big_boom');
                         spawnParticles(enemy.x, enemy.y, 30, 'spark');
+                        if (isMultiplayer) socket.emit('entity_delete', { id: enemy.id });
                         enemies.splice(k, 1);
                     }
 
@@ -1101,16 +1173,15 @@
                     bounceState.vy = Math.sin(rad) * 5;
                     bounceState.timer = 7; // 7 ticks
 
-                    // For enemy, we can just push them manually or let them slide
-                    // Requirement: "both ships bounce". Enemy update is simple directly here.
+                    // For enemy (Reciprocal Bounce - Professor Requirement)
                     const enemyRevAngle = roundedAngle + 180;
                     const eRad = enemyRevAngle * Math.PI / 180;
-                    enemy.x += Math.cos(eRad) * 5 * 7; // Instant push for enemy simplification or state?
-                    // Let's just push them a bit instant for now or they might look weird.
-                    // Or ideally give them a bounce state too. But structure is array.
-                    // Let's simpler: push them 35px away instantly to separate.
-                    enemy.x += Math.cos(eRad) * 35;
-                    enemy.y += Math.sin(eRad) * 35;
+
+                    if (!enemy.bounce) enemy.bounce = { active: false, vx: 0, vy: 0, timer: 0 };
+                    enemy.bounce.active = true;
+                    enemy.bounce.vx = Math.cos(eRad) * 5;
+                    enemy.bounce.vy = Math.sin(eRad) * 5;
+                    enemy.bounce.timer = 7;
                 }
             }
 
@@ -1186,7 +1257,7 @@
                     const e = enemies[j];
                     const toEnemyX = e.x - noseX; const toEnemyY = e.y - noseY;
                     const dp = toEnemyX * laserDirX + toEnemyY * laserDirY;
-                    if (dp > 0) {
+                    if (dp > 0 && networkMode !== 'CLIENT') {
                         const closeX = noseX + laserDirX * dp;
                         const closeY = noseY + laserDirY * dp;
                         if (Math.hypot(e.x - closeX, e.y - closeY) < 30) {
@@ -1200,6 +1271,8 @@
                                     spawnParticles(e.x, e.y, 40, 'med_boom'); // More Fire
                                     spawnParticles(e.x, e.y, 20, 'spark'); // Add Sparks
                                     enemies.splice(j, 1);
+                                    if (isMultiplayer) socket.emit('entity_delete', { id: e.id });
+                                    // Also notify destroy to show particles? EntityDelete does it on Client.
                                 }
                             }
                         }
