@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Space Shooter: Step 9 (Fixes)</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #000000;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: rgba(255, 255, 255, 0.7);
+            pointer-events: none;
+        }
+
+        #ammo-ui {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            color: rgba(255, 255, 255, 0.6);
+            font-family: monospace;
+            font-size: 1.2em;
+            text-align: right;
+            pointer-events: none;
+        }
+
+        #hull-ui {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255, 255, 255, 0.4);
+            font-family: monospace;
+            font-size: 1em;
+            text-align: center;
+            pointer-events: none;
+        }
+
+        .key-hint {
+            display: inline-block;
+            background: rgba(68, 68, 68, 0.7);
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin: 0 2px;
+            font-family: monospace;
+            font-size: 0.9em;
+        }
+
+        .cooldown-bar {
+            width: 100px;
+            height: 4px;
+            background: #444;
+            margin-top: 5px;
+            display: inline-block;
+        }
+
+        .cooldown-fill {
+            height: 100%;
+            background: #00ffff;
+            width: 100%;
+            transition: width 0.1s;
+        }
+
+        .alert {
+            color: #ff3333;
+            font-weight: bold;
+            display: none;
+        }
+
+        #game-over-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #ff3333;
+            z-index: 100;
+        }
+
+        #game-over-screen h1 {
+            font-size: 4em;
+            margin: 0 0 20px 0;
+            text-shadow: 0 0 20px #ff0000;
+            font-family: 'Segoe UI', sans-serif;
+            text-transform: uppercase;
+            letter-spacing: 5px;
+        }
+
+        #restart-btn {
+            background: rgba(255, 0, 0, 0.2);
+            border: 2px solid #ff3333;
+            color: #ff3333;
+            padding: 15px 40px;
+            font-size: 1.5em;
+            cursor: pointer;
+            font-family: monospace;
+            transition: all 0.3s;
+            text-transform: uppercase;
+        }
+
+        #restart-btn:hover {
+            background: #ff3333;
+            color: black;
+            box-shadow: 0 0 20px #ff0000;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="game-over-screen">
+        <h1>Mission Failed</h1>
+        <p style="color: white; margin-bottom: 30px; font-family: monospace; font-size: 1.2em;">HULL INTEGRITY CRITICAL
+        </p>
+        <button id="restart-btn" onclick="location.reload()">RESTART MISSION</button>
+    </div>
+
+    <div id="ui-layer">
+        <h1>Space Shooter</h1>
+        <p><strong>Move:</strong> <span class="key-hint">Numpad</span></p>
+        <p><strong>Front Torpedo:</strong> <span class="key-hint">Shift</span></p>
+        <p><strong>Rear Torpedo:</strong> <span class="key-hint">Ctrl</span></p>
+        <p><strong>Laser:</strong> <span class="key-hint">Space</span> (10s CD)</p>
+        <div id="laser-cd-container">
+            Laser Ready: <div class="cooldown-bar">
+                <div id="laser-bar" class="cooldown-fill"></div>
+            </div>
+        </div>
+        <p>Enemies: <span id="enemy-count">0</span> / 6</p>
+        <p id="alert-msg" class="alert">SYSTEM FAILURE</p>
+    </div>
+
+    <div id="hull-ui">
+        HULL INTEGRITY: <span id="hull-val">100</span>%
+    </div>
+
+    <div id="ammo-ui">
+        <div>TORP FWD: <span id="ammo-fwd">12</span></div>
+        <div>TORP AFT: <span id="ammo-aft">05</span></div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        // --- Constants & Config ---
+        const MOVEMENT_SPEED = 100;
+        const ROTATION_SPEED = 360;
+        const TORPEDO_SPEED = 300;
+        const STAR_COUNT = 200;
+
+        const ENEMY_MAX_COUNT = 6;
+        const ENEMY_SPAWN_RATE = 2000;
+        const ENEMY_PROJECTILE_SPEED = 200;
+
+        const SHIELD_RADIUS = 60;
+        const SHIELD_DECAY = 2.0;
+
+        // --- Canvas Setup ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const countDisplay = document.getElementById('enemy-count');
+        const ammoFwdDisplay = document.getElementById('ammo-fwd');
+        const ammoAftDisplay = document.getElementById('ammo-aft');
+        const hullDisplay = document.getElementById('hull-val');
+        const laserBar = document.getElementById('laser-bar');
+        const alertMsg = document.getElementById('alert-msg');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // --- Game State ---
+        const activeKeys = new Set();
+        let lastTime = performance.now();
+        let enemySpawnTimer = 0;
+        let isGameOver = false;
+
+        const ship = {
+            x: window.innerWidth / 2,
+            y: window.innerHeight / 2,
+            angle: 0,
+            targetAngle: 0,
+            isTurning: false,
+
+            // Health
+            hull: 100,
+
+            // Combat State
+            laserCooldown: 0,
+            laserActiveUntil: 0,
+            torpedoAmmo: { front: 12, rear: 5 },
+
+            // Modules Status (Timestamps for offline/glitch end)
+            modules: {
+                laserOffline: 0,
+                torpFrontOffline: 0,
+                torpRearOffline: 0,
+                targetingGlitch: 0,
+                engineDampened: 0
+            },
+
+            // Shield Data
+            shield: {
+                hits: [],
+                sectors: { front: 100, back: 100, left: 100, right: 100 }
+            }
+        };
+
+        const torpedoes = [];
+        const enemies = [];
+        const enemyProjectiles = [];
+        const stars = [];
+
+        // --- Starfield Generation ---
+        for (let i = 0; i < STAR_COUNT; i++) {
+            stars.push({
+                x: Math.random() * window.innerWidth,
+                y: Math.random() * window.innerHeight,
+                size: Math.random() * 2 + 0.5,
+                brightness: Math.random()
+            });
+        }
+
+        // --- Image Preloading ---
+        const shipImages = [];
+        const enemyImages = [];
+
+        for (let i = 0; i < 16; i++) {
+            const img = new Image();
+            const num = i.toString().padStart(2, '0');
+            img.src = `spaceship_image/ship_${num}.png`;
+            shipImages.push(img);
+        }
+
+        for (let i = 0; i < 16; i++) {
+            const img = new Image();
+            const num = i.toString().padStart(2, '0');
+            img.src = `enemy_ships/enemy_ship${num}.png`;
+            enemyImages.push(img);
+        }
+
+        // --- Enemy Logic ---
+        function createEnemy() {
+            const side = Math.floor(Math.random() * 4);
+            let x, y, initialAngle;
+            const margin = 50;
+
+            switch (side) {
+                case 0: x = Math.random() * canvas.width; y = -margin; initialAngle = 135 + Math.random() * 90; break;
+                case 1: x = canvas.width + margin; y = Math.random() * canvas.height; initialAngle = 225 + Math.random() * 90; break;
+                case 2: x = Math.random() * canvas.width; y = canvas.height + margin; initialAngle = (315 + Math.random() * 90) % 360; break;
+                case 3: x = -margin; y = Math.random() * canvas.height; initialAngle = 45 + Math.random() * 90; break;
+            }
+
+            return {
+                x: x, y: y,
+                angle: initialAngle,
+                targetAngle: initialAngle,
+                nextTurnTime: performance.now() + 1000 + Math.random() * 2000,
+                nextTorpedoTime: performance.now() + 5000 + Math.random() * 5000,
+                nextLaserTime: performance.now() + 2000 + Math.random() * 2000,
+                isLaserActive: false,
+                laserEndTime: 0,
+                isTurning: false,
+                hp: 30 // Added HP for damage logic
+            };
+        }
+
+        // --- Input Handling ---
+        const NUMPAD_MAP = {
+            'Numpad8': 0, 'Numpad9': 45, 'Numpad6': 90, 'Numpad3': 135,
+            'Numpad2': 180, 'Numpad1': 225, 'Numpad4': 270, 'Numpad7': 315
+        };
+        const NUMPAD_COMBOS = [
+            { keys: ['Numpad8', 'Numpad9'], angle: 22.5 },
+            { keys: ['Numpad6', 'Numpad9'], angle: 67.5 },
+            { keys: ['Numpad3', 'Numpad6'], angle: 112.5 },
+            { keys: ['Numpad2', 'Numpad3'], angle: 157.5 },
+            { keys: ['Numpad1', 'Numpad2'], angle: 202.5 },
+            { keys: ['Numpad1', 'Numpad4'], angle: 247.5 },
+            { keys: ['Numpad4', 'Numpad7'], angle: 292.5 },
+            { keys: ['Numpad7', 'Numpad8'], angle: 337.5 }
+        ];
+        const ARROW_MAP = { 'ArrowUp': 0, 'ArrowRight': 90, 'ArrowDown': 180, 'ArrowLeft': 270 };
+        const ARROW_COMBOS = [
+            { keys: ['ArrowUp', 'ArrowRight'], angle: 45 },
+            { keys: ['ArrowRight', 'ArrowDown'], angle: 135 },
+            { keys: ['ArrowDown', 'ArrowLeft'], angle: 225 },
+            { keys: ['ArrowLeft', 'ArrowUp'], angle: 315 }
+        ];
+
+        window.addEventListener('keydown', (e) => {
+            if (isGameOver) return;
+            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'ControlLeft', 'ControlRight'].includes(e.code) || e.code.startsWith('Numpad')) {
+                e.preventDefault();
+            }
+
+            if (!activeKeys.has(e.code)) {
+                if (e.key === 'Shift') firePlayerTorpedo(true);
+                if (e.key === 'Control') firePlayerTorpedo(false);
+                if (e.code === 'Space') firePlayerLaser();
+            }
+
+            activeKeys.add(e.code);
+            updateInputState();
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (isGameOver) return;
+            activeKeys.delete(e.code);
+            updateInputState();
+        });
+
+        function updateInputState() {
+            let newAngle = null;
+            let isNumpadActive = false;
+
+            for (const key of activeKeys) {
+                if (key.startsWith('Numpad') && /[1-9]/.test(key) && key !== 'Numpad5') {
+                    isNumpadActive = true; break;
+                }
+            }
+            if (isNumpadActive) {
+                for (const combo of NUMPAD_COMBOS) {
+                    if (activeKeys.has(combo.keys[0]) && activeKeys.has(combo.keys[1])) {
+                        newAngle = combo.angle; break;
+                    }
+                }
+                if (newAngle === null) {
+                    for (const [code, angle] of Object.entries(NUMPAD_MAP)) {
+                        if (activeKeys.has(code)) { newAngle = angle; break; }
+                    }
+                }
+            } else {
+                const hasArrow = Array.from(activeKeys).some(k => k.startsWith('Arrow'));
+                if (hasArrow) {
+                    for (const combo of ARROW_COMBOS) {
+                        if (activeKeys.has(combo.keys[0]) && activeKeys.has(combo.keys[1])) {
+                            newAngle = combo.angle; break;
+                        }
+                    }
+                    if (newAngle === null) {
+                        for (const [code, angle] of Object.entries(ARROW_MAP)) {
+                            if (activeKeys.has(code)) { newAngle = angle; break; }
+                        }
+                    }
+                }
+            }
+
+            if (newAngle !== null) {
+                ship.targetAngle = newAngle; ship.isTurning = true;
+            } else {
+                ship.isTurning = false;
+            }
+        }
+
+        function firePlayerTorpedo(isFront) {
+            const now = performance.now();
+            let deviation = 0;
+            if (now < ship.modules.targetingGlitch) {
+                deviation = (Math.random() - 0.5) * 40; // +/- 20 deg
+            }
+
+            if (isFront) {
+                if (now < ship.modules.torpFrontOffline) return; // JAMMED
+                if (ship.torpedoAmmo.front > 0) {
+                    ship.torpedoAmmo.front--;
+                    spawnTorpedo(0 + deviation);
+                }
+            } else {
+                if (now < ship.modules.torpRearOffline) return; // JAMMED
+                if (ship.torpedoAmmo.rear > 0) {
+                    ship.torpedoAmmo.rear--;
+                    spawnTorpedo(180 + deviation);
+                }
+            }
+            updateUI();
+        }
+
+        function spawnTorpedo(angleOffset) {
+            const rad = (ship.angle - 90 + angleOffset) * Math.PI / 180;
+            const dx = Math.cos(rad); const dy = Math.sin(rad);
+            torpedoes.push({
+                x: ship.x + dx * 45, y: ship.y + dy * 45, dx: dx, dy: dy
+            });
+        }
+
+        function firePlayerLaser() {
+            const now = performance.now();
+            if (now < ship.modules.laserOffline) return; // JAMMED
+
+            if (now >= ship.laserCooldown) {
+                ship.laserActiveUntil = now + 500;
+                ship.laserCooldown = now + 10000;
+            }
+        }
+
+        function updateUI() {
+            ammoFwdDisplay.innerText = ship.torpedoAmmo.front.toString().padStart(2, '0');
+            ammoAftDisplay.innerText = ship.torpedoAmmo.rear.toString().padStart(2, '0');
+            hullDisplay.innerText = Math.ceil(ship.hull);
+
+            // Critical Hull Color
+            if (ship.hull < 30) hullDisplay.style.color = '#ff0000';
+            else if (ship.hull < 60) hullDisplay.style.color = '#ffaa00';
+            else hullDisplay.style.color = 'rgba(255, 255, 255, 0.4)';
+
+            // Status Alert
+            const now = performance.now();
+            if (now < ship.modules.engineDampened || now < ship.modules.laserOffline || now < ship.modules.torpFrontOffline || now < ship.modules.torpRearOffline || now < ship.modules.targetingGlitch) {
+                alertMsg.style.display = 'block';
+                let msg = [];
+                if (now < ship.modules.engineDampened) msg.push("ENGINE CRITICAL");
+
+                if (now < ship.modules.laserOffline) msg.push("WEAPON OFFLINE");
+                else if (now < ship.modules.torpFrontOffline) msg.push("FWD TORP JAMMED");
+
+                if (now < ship.modules.torpRearOffline) msg.push("REAR TORP JAMMED");
+
+                if (now < ship.modules.targetingGlitch) msg.push("TARGETING ERROR");
+                alertMsg.innerText = msg.join(" | ");
+            } else {
+                alertMsg.style.display = 'none';
+            }
+        }
+
+        function updateRotation(entity, dt) {
+            let diff = entity.targetAngle - entity.angle;
+            while (diff <= -180) diff += 360;
+            while (diff > 180) diff -= 360;
+            if (entity.isTurning) {
+                const maxRot = ROTATION_SPEED * dt;
+                if (Math.abs(diff) <= maxRot) { entity.angle = entity.targetAngle; }
+                else { entity.angle += Math.sign(diff) * maxRot; }
+                entity.angle = (entity.angle + 360) % 360;
+            }
+        }
+
+        function moveForward(entity, dt) {
+            let speed = MOVEMENT_SPEED;
+            if (entity === ship) {
+                if (performance.now() < ship.modules.engineDampened) {
+                    speed *= 0.5; // Engine Dampened
+                }
+            }
+
+            const rad = (entity.angle - 90) * Math.PI / 180;
+            entity.x += Math.cos(rad) * speed * dt;
+            entity.y += Math.sin(rad) * speed * dt;
+        }
+
+        function checkCollision(x1, y1, r1, x2, y2, r2) {
+            return Math.hypot(x2 - x1, y2 - y1) < (r1 + r2);
+        }
+
+        // Handle Damage
+
+
+        function applySystemFailure(sector) {
+            const now = performance.now();
+            const hullFactor = (100 - ship.hull) / 100; // 0 to 1
+            const duration = 5000 + 25000 * hullFactor; // 5s to 30s
+
+            if (sector === 'front') {
+                if (Math.random() < 0.5) {
+                    // JAM BOTH FRONT WEAPONS
+                    ship.modules.laserOffline = now + duration;
+                    ship.modules.torpFrontOffline = now + duration;
+                }
+                else ship.modules.targetingGlitch = now + duration;
+            } else if (sector === 'back') {
+                if (Math.random() < 0.5) ship.modules.torpRearOffline = now + duration;
+                else ship.modules.targetingGlitch = now + duration;
+            } else if (sector === 'left' || sector === 'right') {
+                ship.modules.engineDampened = now + duration;
+            }
+        }
+
+        // --- Particle System ---
+        class Particle {
+            constructor(x, y, type) {
+                this.x = x; this.y = y; this.type = type;
+                this.vx = (Math.random() - 0.5) * 50;
+                this.vy = (Math.random() - 0.5) * 50;
+                this.life = 1.0;
+                this.color = '#fff';
+                this.size = 2;
+
+                if (type === 'spark') {
+                    // Laser vs Hull (Sparkler)
+                    this.vx = (Math.random() - 0.5) * 350; // Faster
+                    this.vy = (Math.random() - 0.5) * 350;
+                    this.life = 0.5 + Math.random() * 0.4;
+                    this.size = 2 + Math.random() * 2.5;
+                    this.color = `255, ${220 + Math.random() * 35}, ${150 + Math.random() * 105}`; // Bright White-Yellow
+                } else if (type === 'glow') {
+                    // Laser vs Shield (Diffuse)
+                    this.vx = 0; this.vy = 0;
+                    this.life = 0.3;
+                    this.size = 15;
+                    this.color = '0, 255, 255';
+                } else if (type === 'small_boom') {
+                    // Torpedo vs Shield
+                    this.vx = (Math.random() - 0.5) * 100;
+                    this.vy = (Math.random() - 0.5) * 100;
+                    this.life = 0.6;
+                    this.size = 5 + Math.random() * 5;
+                    this.color = '255, 200, 100';
+                } else if (type === 'med_boom') {
+                    // Torpedo vs Hull
+                    this.vx = (Math.random() - 0.5) * 150;
+                    this.vy = (Math.random() - 0.5) * 150;
+                    this.life = 0.8;
+                    this.size = 8 + Math.random() * 8;
+                    this.color = '255, 100, 0';
+                } else if (type === 'debris') {
+                    // Ship Destruction
+                    this.vx = (Math.random() - 0.5) * 300; // Fast debris
+                    this.vy = (Math.random() - 0.5) * 300;
+                    this.life = 1.5 + Math.random();
+                    this.size = 2 + Math.random() * 3;
+                    this.color = '200, 200, 200';
+                }
+            }
+            update(dt) {
+                this.x += this.vx * dt;
+                this.y += this.vy * dt;
+                this.life -= dt;
+            }
+        }
+        const particles = [];
+
+        function spawnParticles(x, y, count, type) {
+            for (let i = 0; i < count; i++) {
+                particles.push(new Particle(x, y, type));
+            }
+        }
+
+        // --- Game Update ---
+        function update(dt) {
+            if (isGameOver && ship.hull <= 0) return; // Stop updates only after game over confirmed logic
+            const now = performance.now();
+
+            // Note: Particles are now updated in the loop() function to persist after death.
+            // Old loop removed from here.
+
+            let cdRem = Math.max(0, ship.laserCooldown - now);
+            let pct = ((10000 - cdRem) / 10000) * 100;
+            if (now < ship.laserCooldown) {
+                laserBar.style.width = pct + '%';
+                laserBar.style.backgroundColor = '#666';
+            } else {
+                laserBar.style.width = '100%';
+                laserBar.style.backgroundColor = '#00ffff';
+            }
+
+            if (now > ship.modules.laserOffline && now < ship.modules.laserOffline + 100) updateUI();
+
+            // 0. Spawning
+            enemySpawnTimer += dt * 1000;
+            if (enemies.length < ENEMY_MAX_COUNT && enemySpawnTimer > ENEMY_SPAWN_RATE) {
+                enemies.push(createEnemy());
+                enemySpawnTimer = 0;
+            }
+
+            // 1. Player
+            if (ship.hull > 0) {
+                updateRotation(ship, dt);
+                moveForward(ship, dt);
+                if (ship.x < 0) ship.x = 0; if (ship.x > canvas.width) ship.x = canvas.width;
+                if (ship.y < 0) ship.y = 0; if (ship.y > canvas.height) ship.y = canvas.height;
+            }
+
+            // Shield Decay
+            const sHits = ship.shield.hits;
+            for (let i = sHits.length - 1; i >= 0; i--) {
+                sHits[i].intensity -= SHIELD_DECAY * dt;
+                if (sHits[i].intensity <= 0) sHits.splice(i, 1);
+            }
+
+            // 2. Enemy
+            for (let k = enemies.length - 1; k >= 0; k--) {
+                const enemy = enemies[k];
+                if (now > enemy.nextTurnTime) {
+                    enemy.targetAngle = Math.random() * 360;
+                    enemy.isTurning = true;
+                    enemy.nextTurnTime = now + 1000 + Math.random() * 2000;
+                }
+                if (now > enemy.nextTorpedoTime) {
+                    const angle = Math.atan2(ship.y - enemy.y, ship.x - enemy.x);
+                    const dx = Math.cos(angle), dy = Math.sin(angle);
+                    enemyProjectiles.push({ x: enemy.x + dx * 45, y: enemy.y + dy * 45, dx: dx, dy: dy });
+                    enemy.nextTorpedoTime = now + 5000 + Math.random() * 5000; // Reset timer
+                }
+                if (!enemy.isLaserActive && now > enemy.nextLaserTime) {
+                    enemy.isLaserActive = true;
+                    enemy.laserEndTime = now + 1000;
+                    enemy.nextLaserTime = now + 2500 + Math.random() * 2000;
+                }
+                if (enemy.isLaserActive && now > enemy.laserEndTime) {
+                    enemy.isLaserActive = false;
+                }
+                updateRotation(enemy, dt);
+                moveForward(enemy, dt);
+
+                let hitWall = false;
+                if (enemy.x <= 0) { enemy.x = 0; hitWall = true; enemy.targetAngle = 45 + Math.random() * 90; }
+                else if (enemy.x >= canvas.width) { enemy.x = canvas.width; hitWall = true; enemy.targetAngle = 225 + Math.random() * 90; }
+                if (enemy.y <= 0) { enemy.y = 0; hitWall = true; enemy.targetAngle = 135 + Math.random() * 90; }
+                else if (enemy.y >= canvas.height) { enemy.y = canvas.height; hitWall = true; enemy.targetAngle = (315 + Math.random() * 90) % 360; }
+                if (hitWall) { enemy.isTurning = true; enemy.nextTurnTime = now + 1000; }
+            }
+
+            // 3. Player Torpedoes vs Enemies
+            for (let i = torpedoes.length - 1; i >= 0; i--) {
+                const t = torpedoes[i];
+                t.x += t.dx * TORPEDO_SPEED * dt;
+                t.y += t.dy * TORPEDO_SPEED * dt;
+
+                // Bounds check
+                if (t.x < 0 || t.x > canvas.width || t.y < 0 || t.y > canvas.height) { torpedoes.splice(i, 1); continue; }
+
+                for (let j = enemies.length - 1; j >= 0; j--) {
+                    if (checkCollision(t.x, t.y, 5, enemies[j].x, enemies[j].y, 40)) {
+                        // HIT ENEMY
+                        enemies[j].hp -= 10;
+                        if (enemies[j].hp <= 0) {
+                            spawnParticles(enemies[j].x, enemies[j].y, 40, 'debris'); // Ship Explode
+                            spawnParticles(enemies[j].x, enemies[j].y, 20, 'med_boom'); // Add FIRE
+                            enemies.splice(j, 1);
+                        } else {
+                            // Enemy No Shield -> Hull Explosion
+                            spawnParticles(t.x, t.y, 10, 'med_boom');
+                        }
+                        torpedoes.splice(i, 1); break;
+                    }
+                }
+            }
+
+            // 4. Enemy Projectiles vs Player
+            for (let i = enemyProjectiles.length - 1; i >= 0; i--) {
+                const p = enemyProjectiles[i];
+                p.x += p.dx * ENEMY_PROJECTILE_SPEED * dt;
+                p.y += p.dy * ENEMY_PROJECTILE_SPEED * dt;
+
+                if (p.x < 0 || p.x > canvas.width || p.y < 0 || p.y > canvas.height) {
+                    enemyProjectiles.splice(i, 1); continue;
+                }
+
+                const distToShip = Math.hypot(p.x - ship.x, p.y - ship.y);
+                if (distToShip < SHIELD_RADIUS) {
+                    const angle = Math.atan2(p.y - ship.y, p.x - ship.x);
+                    // Check if shield actually catches it based on sector health
+                    // We need to look ahead at registerHit logic or pass type
+                    registerHit(angle, 'torpedo', p.x, p.y);
+                    enemyProjectiles.splice(i, 1);
+                }
+            }
+
+            // 6. Player Laser Collision
+            if (now < ship.laserActiveUntil) {
+                const rad = (ship.angle - 90) * Math.PI / 180;
+                const noseX = ship.x + Math.cos(rad) * 45;
+                const noseY = ship.y + Math.sin(rad) * 45;
+                const laserDirX = Math.cos(rad); const laserDirY = Math.sin(rad);
+
+                for (let j = enemies.length - 1; j >= 0; j--) {
+                    const e = enemies[j];
+                    const toEnemyX = e.x - noseX; const toEnemyY = e.y - noseY;
+                    const dp = toEnemyX * laserDirX + toEnemyY * laserDirY;
+                    if (dp > 0) {
+                        const closeX = noseX + laserDirX * dp;
+                        const closeY = noseY + laserDirY * dp;
+                        if (Math.hypot(e.x - closeX, e.y - closeY) < 30) {
+                            // HIT ENEMY
+                            if (Math.random() < 0.3) { // Increased hit chance/tick (was 0.2)
+                                e.hp -= 5; // Increased Damage (was 2)
+                                spawnParticles(closeX, closeY, 3, 'spark'); // Hull Sparks
+                                if (e.hp <= 0) {
+                                    // Enemy Destruction
+                                    spawnParticles(e.x, e.y, 60, 'debris'); // More Debris
+                                    spawnParticles(e.x, e.y, 40, 'med_boom'); // More Fire
+                                    spawnParticles(e.x, e.y, 20, 'spark'); // Add Sparks
+                                    enemies.splice(j, 1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            countDisplay.innerText = enemies.length;
+        }
+
+        // --- Modified RegisterHit ---
+        function registerHit(impactAngle, type, hitX, hitY) {
+            if (ship.hull <= 0) return;
+
+            const shipRad = (ship.angle - 90) * Math.PI / 180;
+            let rel = impactAngle - shipRad;
+            while (rel <= -Math.PI) rel += Math.PI * 2;
+            while (rel > Math.PI) rel -= Math.PI * 2;
+            const relDeg = rel * 180 / Math.PI;
+
+            let sector = 'front';
+            if (relDeg >= 45 && relDeg < 135) sector = 'right';
+            else if (relDeg >= -135 && relDeg < -45) sector = 'left';
+            else if (relDeg >= 135 || relDeg < -135) sector = 'back';
+
+            if (ship.shield.sectors[sector] > 0) {
+                // Shield Absorbs
+                const dmg = (type === 'torpedo') ? 25 : 0.5; // Torp does more shield dmg
+                ship.shield.sectors[sector] = Math.max(0, ship.shield.sectors[sector] - dmg);
+
+                // VFX: Shield Hit
+                if (!isNaN(impactAngle)) {
+                    ship.shield.hits.push({ angle: impactAngle, intensity: 1.2, color: getSectorColor(ship.shield.sectors[sector]) });
+                }
+
+                // Specific VFX per weapon on Shield
+                const px = ship.x + Math.cos(impactAngle) * SHIELD_RADIUS;
+                const py = ship.y + Math.sin(impactAngle) * SHIELD_RADIUS;
+
+                if (type === 'torpedo') spawnParticles(px, py, 5, 'small_boom');
+                else spawnParticles(px, py, 1, 'glow'); // Laser
+
+            } else {
+                // Hull Damage
+                let dmg = (type === 'torpedo') ? 15 : 1;
+                if (sector === 'left' || sector === 'right') dmg *= 2;
+
+                ship.hull -= dmg;
+
+                // VFX: Hull Hit
+                const px = ship.x + Math.cos(impactAngle) * 45; // Approx hull surface
+                const py = ship.y + Math.sin(impactAngle) * 45;
+
+                if (type === 'torpedo') spawnParticles(px, py, 15, 'med_boom');
+                else spawnParticles(px, py, 5, 'spark');
+
+                if (ship.hull <= 0) {
+                    ship.hull = 0;
+                    isGameOver = true;
+                    // Explosion VFX
+                    spawnParticles(ship.x, ship.y, 100, 'debris');
+                    spawnParticles(ship.x, ship.y, 60, 'med_boom');
+                    spawnParticles(ship.x, ship.y, 50, 'spark');
+                    setTimeout(() => {
+                        document.getElementById('game-over-screen').style.display = 'flex';
+                    }, 2000);
+                }
+                applySystemFailure(sector);
+            }
+            updateUI();
+        }
+
+        function getSectorColor(hp) {
+            if (hp > 75) return '0, 255, 0';
+            if (hp > 50) return '255, 255, 0';
+            if (hp > 25) return '255, 128, 0';
+            return '255, 0, 0';
+        }
+
+        function drawParticles() {
+            for (const p of particles) {
+                ctx.globalAlpha = p.life;
+                ctx.fillStyle = `rgba(${p.color}, ${p.life})`;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.globalAlpha = 1.0;
+        }
+
+        function drawEntity(entity, imgArray) {
+            let index = Math.round(((360 - entity.angle) % 360) / 22.5);
+            index = index % 16;
+            const img = imgArray[index];
+            if (img && img.complete) {
+                ctx.drawImage(img, entity.x - 45, entity.y - 45, 90, 90);
+            }
+        }
+
+        function drawShield() {
+            if (ship.shield.hits.length === 0) return;
+
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(ship.x, ship.y, SHIELD_RADIUS, 0, Math.PI * 2);
+            ctx.clip();
+
+            ctx.fillStyle = 'rgba(0, 255, 255, 0.05)';
+            ctx.fill();
+
+            for (const hit of ship.shield.hits) {
+                const intensity = hit.intensity;
+                if (intensity <= 0) continue;
+
+                const hitX = ship.x + Math.cos(hit.angle) * SHIELD_RADIUS;
+                const hitY = ship.y + Math.sin(hit.angle) * SHIELD_RADIUS;
+
+                if (!isNaN(hitX) && !isNaN(hitY)) {
+                    const grad = ctx.createRadialGradient(hitX, hitY, 0, hitX, hitY, 50);
+                    const colStr = hit.color || '0, 255, 255';
+
+                    grad.addColorStop(0, `rgba(255, 255, 255, ${intensity})`);
+                    grad.addColorStop(0.3, `rgba(${colStr}, ${intensity * 0.8})`);
+                    grad.addColorStop(1, `rgba(${colStr}, 0)`);
+
+                    ctx.fillStyle = grad;
+                    ctx.fillRect(ship.x - SHIELD_RADIUS, ship.y - SHIELD_RADIUS, SHIELD_RADIUS * 2, SHIELD_RADIUS * 2);
+                }
+            }
+
+            ctx.strokeStyle = `rgba(0, 255, 255, 0.3)`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(ship.x, ship.y, SHIELD_RADIUS - 1, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.restore();
+        }
+
+        function draw() {
+            const now = performance.now();
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Stars
+            ctx.fillStyle = '#ffffff';
+            for (const s of stars) {
+                ctx.globalAlpha = s.brightness;
+                ctx.beginPath(); ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2); ctx.fill();
+            }
+            ctx.globalAlpha = 1.0;
+
+            drawParticles(); // Draw VFX
+
+            // Only draw game entities if NOT game over (or maybe keep drawing debris?)
+            // We want to see the explosion, so we keep drawing everything until the overlay covers it?
+            // Actually, if we stop updating entities, they freeze. We should keep drawing particles.
+
+            if (!isGameOver) {
+                // Player Torpedoes
+                ctx.fillStyle = '#ffcc00'; ctx.strokeStyle = '#ff4400';
+                for (const t of torpedoes) {
+                    ctx.beginPath(); ctx.arc(t.x, t.y, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                }
+
+                // Enemy Projectiles
+                ctx.fillStyle = '#ff0000'; ctx.strokeStyle = '#ff8888';
+                for (const p of enemyProjectiles) {
+                    ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+                }
+
+                // Enemy Lasers
+                for (const e of enemies) {
+                    if (e.isLaserActive) {
+                        // ... draw laser ...
+                        const rad = (e.angle - 90) * Math.PI / 180;
+                        const noseX = e.x + Math.cos(rad) * 45;
+                        const noseY = e.y + Math.sin(rad) * 45;
+                        let drawLen = 1000;
+                        const laserDirX = Math.cos(rad); const laserDirY = Math.sin(rad);
+
+                        // Raycast Collision Check
+                        const toShipX = ship.x - noseX; const toShipY = ship.y - noseY;
+                        const t = toShipX * laserDirX + toShipY * laserDirY;
+                        const closestX = noseX + t * laserDirX;
+                        const closestY = noseY + t * laserDirY;
+                        const distSq = (closestX - ship.x) ** 2 + (closestY - ship.y) ** 2;
+
+                        if (distSq < SHIELD_RADIUS ** 2 && t > 0) {
+                            const dt = Math.sqrt(SHIELD_RADIUS ** 2 - distSq);
+                            const tIntersect = t - dt;
+                            if (tIntersect > 0 && tIntersect < drawLen) {
+                                if (ship.shield.sectors.front > 0 || ship.shield.sectors.back > 0 || ship.shield.sectors.left > 0 || ship.shield.sectors.right > 0) {
+                                    drawLen = tIntersect;
+                                    if (Math.random() < 0.2) {
+                                        const hitAngle = Math.atan2((noseY + laserDirY * tIntersect) - ship.y, (noseX + laserDirX * tIntersect) - ship.x);
+                                        registerHit(hitAngle, 'laser', 0, 0);
+                                    }
+                                }
+                            }
+                        }
+
+                        const endX = noseX + laserDirX * drawLen;
+                        const endY = noseY + laserDirY * drawLen;
+                        ctx.strokeStyle = '#ff0000'; ctx.lineWidth = 2;
+                        ctx.beginPath(); ctx.moveTo(noseX, noseY); ctx.lineTo(endX, endY); ctx.stroke();
+                        ctx.shadowBlur = 5; ctx.shadowColor = '#ff0000'; ctx.stroke(); ctx.shadowBlur = 0;
+                    }
+                }
+
+                // Enemies
+                for (const e of enemies) {
+                    drawEntity(e, enemyImages);
+                }
+
+                // Player Ship (Don't draw if destroyed? Or just let it be covered by explosion)
+                if (ship.hull > 0) drawEntity(ship, shipImages);
+                if (ship.hull > 0) drawShield();
+
+                // Player Laser
+                if (now < ship.laserActiveUntil) {
+                    const rad = (ship.angle - 90) * Math.PI / 180;
+                    const noseX = ship.x + Math.cos(rad) * 45;
+                    const noseY = ship.y + Math.sin(rad) * 45;
+                    const endX = noseX + Math.cos(rad) * 2000;
+                    const endY = noseY + Math.sin(rad) * 2000;
+                    ctx.strokeStyle = '#22aaff'; ctx.lineWidth = 4;
+                    ctx.beginPath(); ctx.moveTo(noseX, noseY); ctx.lineTo(endX, endY); ctx.stroke();
+                    ctx.shadowBlur = 15; ctx.shadowColor = '#ffffff'; ctx.stroke(); ctx.shadowBlur = 0;
+                }
+            }
+        }
+
+        function loop(timestamp) {
+            const dt = (timestamp - lastTime) / 1000;
+            lastTime = timestamp;
+
+            // ALWAYS update particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.update(dt);
+                if (p.life <= 0) particles.splice(i, 1);
+            }
+
+            if (!isGameOver) {
+                update(dt);
+            }
+            draw(); // Always draw to show particles fading out
+
+            // Stop loop ONLY if game over AND particles are gone? No, just keep running until overlay.
+            // Actually, requestAnimationFrame should keep running for VFX.
+            // But we don't want to update game logic (move ship etc) if game over.
+
+            requestAnimationFrame(loop);
+        }
+
+        requestAnimationFrame(loop);
+
+    </script>
+</body>
+
+</html>
